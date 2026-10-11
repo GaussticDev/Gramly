@@ -95,14 +95,14 @@ HANDLER_UPDATES: dict = {
     "_bizConnectionHandlers": ["business_connection"],
     "_commandBlocks": ["message", "callback_query", "business_message"],
 }
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 __bot_api_version__ = "10.3"
 
 __all__ = [
     "Gramly", "Rich",
-    "btn", "row", "kbd", "userRequest", "chatRequest", "business",
+    "btn", "row", "kbd", "userRequest", "chatRequest", "managedBotRequest", "business",
     "CallbackData", "Message", "CallbackQuery", "InlineQuery", "Payment", "PreCheckout",
-    "JoinRequest", "GuestQuery", "BusinessMessage", "BusinessConnection",
+    "JoinRequest", "GuestQuery", "BusinessMessage", "BusinessConnection", "ManagedBot",
     "TimerHandle", "CommandBlock", "TelegramError",
     "Obj", "User", "Chat", "SuccessfulPayment",
     "setupLogging", "chatId", "userId",
@@ -188,6 +188,22 @@ def toList(value) -> list:
 
 def isNotModified(e: Exception) -> bool:
     return "message is not modified" in str(e).lower()
+
+def _businessParams(params: dict) -> dict:
+    params = dict(params)
+    businessConnectionId = params.pop("businessConnectionId", None)
+    rawBusinessConnectionId = params.get("business_connection_id")
+    if businessConnectionId is not None and rawBusinessConnectionId is not None:
+        if businessConnectionId != rawBusinessConnectionId:
+            raise ValueError(
+                "businessConnectionId conflicts with business_connection_id"
+            )
+    connectionId = businessConnectionId if businessConnectionId is not None else rawBusinessConnectionId
+    if connectionId is not None:
+        if not isinstance(connectionId, str) or not connectionId:
+            raise ValueError("businessConnectionId must be a non-empty string")
+        params["business_connection_id"] = connectionId
+    return params
 
 _MEDIA_METHODS: dict = {
     "video": ("sendVideo", "video"),
@@ -407,6 +423,9 @@ class _UserRequest(dict):
 class _ChatRequest(dict):
     __slots__ = ()
 
+class _ManagedBotRequest(dict):
+    __slots__ = ()
+
 def userRequest(
     requestId: int,
     *,
@@ -459,6 +478,15 @@ def chatRequest(
     d.update((key, value) for key, value in fields if value is not None)
     return d
 
+def managedBotRequest(requestId: int, *, suggestedName: str = None, suggestedUsername: str = None) -> _ManagedBotRequest:
+    d = _ManagedBotRequest({"request_id": requestId})
+    fields = (
+        ("suggested_name", suggestedName),
+        ("suggested_username", suggestedUsername),
+    )
+    d.update((key, value) for key, value in fields if value is not None)
+    return d
+
 class business:
 
     __slots__ = ("bcIds",)
@@ -477,6 +505,8 @@ class business:
         if bcId is None and isinstance(target, (dict, Obj)):
             raw = target._d if isinstance(target, Obj) else target
             bcId = raw.get("business_connection_id")
+        if not bcId:
+            return False
         return not self.bcIds or bcId in self.bcIds
 
     def __repr__(self) -> str:
@@ -527,17 +557,18 @@ def btn(text: str, action=None, *,
     if total == 0 and not disabled:
         raise ValueError(
             f"btn('{text}'): no action - pass callback_data string, "
-            "userRequest(...), chatRequest(...), or a keyword action: "
+            "userRequest(...), chatRequest(...), managedBotRequest(...), "
+            "or a keyword action: "
             "url / miniApp / loginUrl / switchInline / switchInlineCurrent / "
             "switchInlineChosen / copyText / pay / "
             "requestPoll / requestContact / requestLocation / disabled"
         )
     if total > 1:
         raise ValueError(f"btn('{text}'): exactly one action allowed, got {total}")
-    if action is not None and not isinstance(action, (str, _UserRequest, _ChatRequest)):
+    if action is not None and not isinstance(action, (str, _UserRequest, _ChatRequest, _ManagedBotRequest)):
         raise ValueError(
-            f"btn('{text}'): action must be a str, userRequest(...), or chatRequest(...); "
-            f"got {type(action).__name__!r}"
+            f"btn('{text}'): action must be a str, userRequest(...), chatRequest(...), "
+            f"or managedBotRequest(...); got {type(action).__name__!r}"
         )
     if isinstance(action, str) and len(action.encode()) > _CB_LIMIT:
         raise ValueError(f"callback_data too long ({len(action.encode())} bytes): {action!r}")
@@ -560,6 +591,7 @@ def btn(text: str, action=None, *,
         "pay": pay,
         "request_user": dict(action) if isinstance(action, _UserRequest) else None,
         "request_chat": dict(action) if isinstance(action, _ChatRequest) else None,
+        "request_managed_bot": dict(action) if isinstance(action, _ManagedBotRequest) else None,
         "request_poll": requestPoll,
         "request_contact": requestContact or None,
         "request_location": requestLocation or None,
@@ -668,6 +700,8 @@ def buildReplyKeyboard(rows, forceReply: bool = None) -> dict:
                     btnObj["request_users"] = b["request_user"]
                 if b.get("request_chat"):
                     btnObj["request_chat"] = b["request_chat"]
+                if b.get("request_managed_bot"):
+                    btnObj["request_managed_bot"] = b["request_managed_bot"]
                 if b.get("mini_app"):
                     btnObj["web_app"] = {"url": b["mini_app"]}
                 rowBtns.append(btnObj)
@@ -1245,8 +1279,8 @@ class ArgsMixin:
     def argFloat(self, index: int, default: float = None) -> Optional[float]:
         return self.arg(index, cast=float, default=default)
 
-    def argsJoined(self, sep: str = " ") -> str:
-        return sep.join(self.args)
+    def argsFrom(self, index: int = 0, sep: str = " ") -> str:
+        return sep.join(self.args[index:])
 
 class RawAttrMixin:
     __slots__ = ()
@@ -1395,10 +1429,11 @@ class Message(ArgsMixin, RawAttrMixin):
         return f"Message({self.message_id}, {self.text!r})"
 
 class CallbackQuery(ArgsMixin, RawAttrMixin):
-    __slots__ = ("_raw", "cb", "args", "data", "message", "from_user", "chat", "id", "_answered", "bc_id")
+    __slots__ = ("_raw", "_gramly", "cb", "args", "data", "message", "from_user", "chat", "id", "_answered", "bc_id")
 
-    def __init__(self, raw: dict, cb: CallbackData, args: list = None):
+    def __init__(self, raw: dict, cb: CallbackData, args: list = None, gramly=None):
         self._raw = raw
+        self._gramly = gramly
         self.cb = cb
         self.args = args if args is not None else list(cb.args)
         self.data = raw.get("data")
@@ -1457,6 +1492,21 @@ class CallbackQuery(ArgsMixin, RawAttrMixin):
     @property
     def inlineMessageId(self) -> Optional[str]:
         return self._raw.get("inline_message_id")
+
+    def ack(self):
+        return self._gramly.ack(self)
+
+    def answer(self, text: str = "", popup: bool = False):
+        return self._gramly.alert(self, text=text, popup=popup)
+
+    def alert(self, text: str = "", popup: bool = False):
+        return self._gramly.alert(self, text=text, popup=popup)
+
+    def edit(self, text, inline=None, **kwargs):
+        return self._gramly.edit(self, text, inline=inline, **kwargs)
+
+    def editMarkup(self, inline=None):
+        return self._gramly.editMarkup(self, inline)
 
     def __repr__(self) -> str:
         return f"CallbackQuery({self.id!r}, {self.data!r})"
@@ -1644,6 +1694,37 @@ class BusinessConnection(RawAttrMixin):
     def __repr__(self) -> str:
         return f"BusinessConnection(id={self.id!r}, enabled={self.isEnabled})"
 
+class ManagedBot(RawAttrMixin):
+    __slots__ = ("_raw", "_gramly")
+
+    def __init__(self, raw: dict, gramly):
+        self._raw = raw
+        self._gramly = gramly
+
+    @property
+    def creator(self):
+        return User.fromDict(self._raw.get("user"))
+
+    @property
+    def bot(self):
+        return User.fromDict(self._raw.get("bot"))
+
+    @property
+    def botId(self) -> Optional[int]:
+        b = self.bot
+        return b.id if b else None
+
+    def token(self):
+        return self._gramly._api_call("getManagedBotToken", user_id=self.botId)
+
+    def replaceToken(self):
+        return self._gramly._api_call("replaceManagedBotToken", user_id=self.botId)
+
+    def __repr__(self) -> str:
+        b = self.bot
+        uname = b.username if b else None
+        return f"ManagedBot(bot=@{uname}, id={self.botId})"
+
 class BusinessMessage(ArgsMixin, RawAttrMixin):
     __slots__ = (
         "_raw", "_gramly", "args", "match",
@@ -1686,8 +1767,29 @@ class BusinessMessage(ArgsMixin, RawAttrMixin):
     def userId(self) -> Optional[int]:
         return self.user_id
 
-    def reply(self, text: str, inline=None, keyboard=None, **kwargs):
-        return self._gramly.businessSend(self.chat_id, text, self.bc_id, inline=inline, keyboard=keyboard, **kwargs)
+    def send(
+        self, target, text, inline=None, keyboard=None, photo=None,
+        forceReply: bool = None, **kwargs,
+    ):
+        return self._gramly.send(
+            target, text, inline=inline, keyboard=keyboard, photo=photo,
+            forceReply=forceReply, businessConnectionId=self.bc_id, **kwargs,
+        )
+
+    def reply(self, text, inline=None, keyboard=None, **kwargs):
+        return self._gramly.reply(self, text, inline=inline, keyboard=keyboard, **kwargs)
+
+    def photo(self, target, photo, caption=None, inline=None, keyboard=None, **kwargs):
+        return self._gramly.photo(
+            target, photo, caption=caption, inline=inline, keyboard=keyboard,
+            business_connection_id=self.bc_id, **kwargs,
+        )
+
+    def media(self, target, items, caption=None, inline=None, keyboard=None, **kwargs):
+        return self._gramly.media(
+            target, items, caption=caption, inline=inline, keyboard=keyboard,
+            business_connection_id=self.bc_id, **kwargs,
+        )
 
     def typing(self, action: str = "typing"):
         return self._gramly.businessAction(self.chat_id, self.bc_id, action)
@@ -1741,7 +1843,7 @@ class GuestQuery:
         return self._raw.get("text")
 
     def answer(self, text: str, parseMode: str = None, **kwargs):
-        return self._gramly._api_call("answerGuestQuery", guest_query_id=self.id, message={"text": text, "parse_mode": parseMode or self._gramly.parse_mode, **kwargs})
+        return self._gramly._api_call("answerGuestQuery", guest_query_id=self.id, message={"text": text, "parse_mode": parseMode or self._gramly.parseMode, **kwargs})
 
     def __repr__(self) -> str:
         return f"GuestQuery(id={self.id!r})"
@@ -1770,7 +1872,7 @@ class InlineQuery:
         return {
             "type": "article", "id": resultId or title, "title": title,
             "description": description, "thumbnail_url": thumbUrl,
-            "input_message_content": {"message_text": text, "parse_mode": kwargs.pop("parseMode", None) or self._gramly.parse_mode},
+            "input_message_content": {"message_text": text, "parse_mode": kwargs.pop("parseMode", None) or self._gramly.parseMode},
             **kwargs,
         }
 
@@ -1969,12 +2071,10 @@ def matchText(
     return None, None
 
 class TextRoute:
-    __slots__ = ("fn", "args_min", "args_error", "filters", "exact", "starts", "ends", "contains", "regex")
+    __slots__ = ("fn", "filters", "exact", "starts", "ends", "contains", "regex")
 
-    def __init__(self, fn, args_min: int = None, args_error: str = None, filters=None, exact=None, starts=None, ends=None, contains=None, regex=None):
+    def __init__(self, fn, filters=None, exact=None, starts=None, ends=None, contains=None, regex=None):
         self.fn = fn
-        self.args_min = args_min
-        self.args_error = args_error
         self.filters = list(filters or [])
         self.exact = exact
         self.starts = starts
@@ -2026,20 +2126,17 @@ class _RouteResult:
 @dataclass
 class CallbackRoute:
     fn: Callable
-    args_min: Optional[int]
-    args_error: Optional[str]
     filters: Optional[list] = None
 
 class CommandBlock:
     __slots__ = (
         "_gramly", "_triggersSingle", "_triggersMulti", "_triggerPrefixes", "_triggerSuffixes",
         "_withSlash", "_withoutSlash",
-        "_blockArgsMin", "_blockArgsError",
         "_filters", "_defaultFn", "_defaultFilters", "_exactRoutes", "_patternRoutes", "_callbackRoutes", "_registered",
         "_business",
     )
 
-    def __init__(self, gramly, triggers: list, withSlash: bool = True, withoutSlash: bool = True, args_min: int = None, args_error: str = None, filters=None, starts=None, ends=None, business=None):
+    def __init__(self, gramly, triggers: list, withSlash: bool = True, withoutSlash: bool = True, filters=None, starts=None, ends=None, business=None):
         self._gramly = gramly
         self._triggersSingle = set()
         self._triggersMulti = set()
@@ -2053,16 +2150,8 @@ class CommandBlock:
         self._triggerSuffixes = [e.lower() for e in toList(ends)]
         if not (self._triggersSingle or self._triggersMulti or self._triggerPrefixes or self._triggerSuffixes):
             raise ValueError("CommandBlock: provide at least one of triggers, starts=, or ends=")
-        if (self._triggerPrefixes or self._triggerSuffixes) and (args_min is not None or args_error is not None):
-            raise ValueError(
-                "CommandBlock: args_min/args_error count args from the block trigger, which is ambiguous "
-                "for starts=/ends= blocks (the matched sub-command name would count as an arg). "
-                "Use block.on(name, args=N, error=...) instead."
-            )
         self._withSlash = withSlash
         self._withoutSlash = withoutSlash
-        self._blockArgsMin = args_min
-        self._blockArgsError = args_error
         self._filters = list(filters or [])
         self._defaultFn = None
         self._defaultFilters = []
@@ -2122,14 +2211,14 @@ class CommandBlock:
             return handler
         return decorator(fn) if fn is not None else decorator
 
-    def on(self, *keys, exact=None, starts=None, ends=None, contains=None, regex=None, args: int = None, error: str = None, filters=None) -> Callable:
+    def on(self, *keys, exact=None, starts=None, ends=None, contains=None, regex=None, filters=None) -> Callable:
         def decorator(fn):
             routeFilters = list(filters or [])
             if keys:
                 for k in keys:
-                    self._addRoute(k.lower(), TextRoute(fn, args, error, filters=routeFilters, exact=k))
+                    self._addRoute(k.lower(), TextRoute(fn, filters=routeFilters, exact=k))
             else:
-                route = TextRoute(fn, args, error, filters=routeFilters, exact=exact, starts=starts, ends=ends, contains=contains, regex=regex)
+                route = TextRoute(fn, filters=routeFilters, exact=exact, starts=starts, ends=ends, contains=contains, regex=regex)
                 self._addRoute(exact.lower() if route.isPlainExact else None, route)
             return fn
         return decorator
@@ -2142,14 +2231,14 @@ class CommandBlock:
         else:
             self._patternRoutes.append(route)
 
-    def onCallback(self, *actions, args: int = None, error: str = None, filters=None) -> Callable:
+    def onCallback(self, *actions, filters=None) -> Callable:
         def decorator(fn):
             routeFilters = list(filters or [])
             for a in actions:
                 key = a.lower()
                 if key in self._callbackRoutes:
                     raise ValueError(f"CommandBlock.onCallback: duplicate action {key!r} already registered")
-                self._callbackRoutes[key] = CallbackRoute(fn, args, error, routeFilters)
+                self._callbackRoutes[key] = CallbackRoute(fn, routeFilters)
             return fn
         return decorator
 
@@ -2194,18 +2283,6 @@ class CommandBlock:
         if resolved is None:
             return
         _, cmdArgs = resolved
-        bcId = raw.get("business_connection_id") if spec is not None else None
-
-        def _reject(text):
-            if spec is not None:
-                g.businessSend(chatId(raw), text, bcId)
-            else:
-                g.send(chatId(raw), text)
-
-        if self._blockArgsMin is not None and len(cmdArgs) < self._blockArgsMin:
-            if self._blockArgsError:
-                _reject(self._blockArgsError)
-            return
 
         g._runInterceptors(raw)
         g._markHandled(raw.get("message_id"))
@@ -2228,10 +2305,6 @@ class CommandBlock:
             return
 
         msg = _parsed(result.args, result.match)
-        if result.route.args_min is not None and len(result.args) < result.route.args_min:
-            if result.route.args_error:
-                _reject(result.route.args_error)
-            return
         if spec is not None and not spec.match(msg):
             return
         g._submitFiltered(result.route.fn, msg, self._filters + result.route.filters)
@@ -2250,18 +2323,18 @@ class CommandBlock:
         async def _run():
             cb = CallbackData(data)
             extra = list(cb.args)
-            parsed = CallbackQuery(raw, cb, args=extra)
-            if route.args_min is not None and len(extra) < route.args_min:
-                if route.args_error:
-                    await g.alert(parsed, route.args_error, popup=True)
-                else:
-                    await g.ack(parsed)
-                return
+            parsed = CallbackQuery(raw, cb, args=extra, gramly=g)
+
+            async def _answer(text="", popup=False):
+                res = g.alert(parsed, text=text, popup=popup)
+                if asyncio.isfuture(res):
+                    await res
+
             if not await self._runFilterList(self._filters, parsed):
-                await g.ack(parsed)
+                await _answer()
                 return
             if not await self._runFilterList(route.filters, parsed):
-                await g.ack(parsed)
+                await _answer()
                 return
             await g._runCallback(parsed, route.fn)
 
@@ -2346,7 +2419,7 @@ class Gramly:
             _log.error("background_task", err=exc)
 
     def _api_call(self, method, **params):
-        return self._schedule(self._api.call(method, **params))
+        return self._schedule(self._api.call(method, **_businessParams(params)))
 
     async def _safeCoro(self, method, **params):
         try:
@@ -2370,13 +2443,13 @@ class Gramly:
         return self._schedule(_guarded())
 
     def _api_callFile(self, method, fileKey, fileObj, filename, contentType, **params):
-        return self._schedule(self._api.callFile(method, fileKey=fileKey, fileObj=fileObj, filename=filename, contentType=contentType, **params))
+        return self._schedule(self._api.callFile(method, fileKey=fileKey, fileObj=fileObj, filename=filename, contentType=contentType, **_businessParams(params)))
 
     def _api_callMediaGroup(self, chatId, items, **params):
-        return self._schedule(self._api.callMediaGroup(chatId, items, **params))
+        return self._schedule(self._api.callMediaGroup(chatId, items, **_businessParams(params)))
 
     def _api_callRich(self, method, jsonField, jsonValue, attachments, **params):
-        return self._schedule(self._api.callWithAttachments(method, jsonField, jsonValue, attachments, **params))
+        return self._schedule(self._api.callWithAttachments(method, jsonField, jsonValue, attachments, **_businessParams(params)))
 
     def _debug(self, action: str, **ctx):
         if self.debug:
@@ -2586,7 +2659,7 @@ class Gramly:
         self._stopCallbacks.append(fn)
         return self
 
-    def command(self, *triggers, withSlash: bool = True, withoutSlash: bool = True, args_min: int = None, args_error: str = None, filters=None, starts=None, ends=None):
+    def command(self, *triggers, withSlash: bool = True, withoutSlash: bool = True, filters=None, starts=None, ends=None):
         triggers, spec = _businessArg(triggers)
 
         def decorator(fn):
@@ -2595,8 +2668,6 @@ class Gramly:
                 list(triggers),
                 withSlash=withSlash,
                 withoutSlash=withoutSlash,
-                args_min=args_min,
-                args_error=args_error,
                 filters=filters,
                 starts=starts,
                 ends=ends,
@@ -2607,7 +2678,7 @@ class Gramly:
             return fn
         return decorator
 
-    def onMessage(self, commands=None, exact=None, starts=None, ends=None, contains=None, regex=None, withSlash: bool = True, withoutSlash: bool = True, args_min: int = None, args_error: str = None, filters=None):
+    def onMessage(self, commands=None, exact=None, starts=None, ends=None, contains=None, regex=None, withSlash: bool = True, withoutSlash: bool = True, filters=None):
         asList = isinstance(commands, (list, tuple))
         raw, spec = _businessArg(tuple(commands) if asList else (commands,))
         for v in (exact, starts, ends, contains, regex):
@@ -2628,10 +2699,6 @@ class Gramly:
                             return
                         msg.args = args
                         msg.match = match
-                    if args_min is not None and len(msg.args) < args_min:
-                        if args_error:
-                            self.businessSend(msg.chat_id, args_error, msg.bc_id)
-                        return
                     self._submitFiltered(fn, msg, filters)
                 self._bizMsgHandlers.append(_handle)
                 return fn
@@ -2647,10 +2714,6 @@ class Gramly:
                 if uid and not self._checkCooldown(uid, "msg"):
                     return
                 parsed = Message(raw, args, match=match)
-                if args_min is not None and len(args) < args_min:
-                    if args_error:
-                        self.send(raw["chat"]["id"], args_error)
-                    return
                 self._runInterceptors(raw)
                 self._markHandled(raw.get("message_id"))
                 self._submitFiltered(fn, parsed, filters)
@@ -2724,6 +2787,8 @@ class Gramly:
         return decorator
 
     def onCallback(self, *prefixes, filters=None):
+        prefixes, spec = _businessArg(prefixes)
+
         def decorator(fn):
             routeFilters = list(filters or [])
             def _handle(raw: dict):
@@ -2734,7 +2799,10 @@ class Gramly:
 
                 async def _run():
                     cb = CallbackData(data)
-                    parsed = CallbackQuery(raw, cb)
+                    parsed = CallbackQuery(raw, cb, gramly=self)
+                    if spec is not None and not spec.match(parsed):
+                        await self.ack(parsed)
+                        return
                     if routeFilters and not await self._runFilterList(routeFilters, parsed):
                         await self.ack(parsed)
                         return
@@ -2830,8 +2898,9 @@ class Gramly:
     def onBusinessEdited(self):
         return self.onEdited(business())
 
-    def onBusinessMessage(self, **kw):
-        return self.onMessage(business(), **kw)
+    def onBusinessMessage(self, commands=None, **kw):
+        marker = [business(), *toList(commands)] if commands is not None else business()
+        return self.onMessage(marker, **kw)
 
     def businessConnection(self, bcId: str):
 
@@ -2853,8 +2922,10 @@ class Gramly:
             return None
 
     def businessSend(self, target, text: str, bcId: str, inline=None, keyboard=None, **kwargs):
-        markup = self._resolveMarkup(inline, keyboard)
-        return self._api_call("sendMessage", chat_id=chatId(target), text=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, business_connection_id=bcId, reply_markup=markup, **kwargs)
+        return self.send(
+            target, text, inline=inline, keyboard=keyboard,
+            businessConnectionId=bcId, **kwargs,
+        )
 
     def businessAction(self, target, bcId: str, action: str = "typing"):
         return self._safe("sendChatAction", chat_id=chatId(target), action=action, business_connection_id=bcId)
@@ -2864,6 +2935,53 @@ class Gramly:
 
     def businessDelete(self, target, messageIds: list, bcId: str):
         return self.delete(target, messageIds, bcId=bcId)
+
+        
+
+    def setBusinessName(self, bcId: str, firstName: str, lastName: str = None):
+        return self._api_call("setBusinessAccountName", business_connection_id=bcId, first_name=firstName, last_name=lastName)
+
+    def setBusinessUsername(self, bcId: str, username: str = None):
+        return self._api_call("setBusinessAccountUsername", business_connection_id=bcId, username=username)
+
+    def setBusinessBio(self, bcId: str, bio: str = None):
+        return self._api_call("setBusinessAccountBio", business_connection_id=bcId, bio=bio)
+
+    def setBusinessPhoto(self, bcId: str, photo, isPublic: bool = None):
+        return self._api_call("setBusinessAccountProfilePhoto", business_connection_id=bcId, photo=photo, is_public=isPublic)
+
+    def removeBusinessPhoto(self, bcId: str, isPublic: bool = None):
+        return self._api_call("removeBusinessAccountProfilePhoto", business_connection_id=bcId, is_public=isPublic)
+
+    def setBusinessGiftSettings(self, bcId: str, showGiftButton: bool, acceptedGiftTypes: dict):
+        return self._api_call("setBusinessAccountGiftSettings", business_connection_id=bcId, show_gift_button=showGiftButton, accepted_gift_types=acceptedGiftTypes)
+
+    def getBusinessStars(self, bcId: str):
+        return self._api_call("getBusinessAccountStarBalance", business_connection_id=bcId)
+
+    def transferBusinessStars(self, bcId: str, starCount: int):
+        return self._api_call("transferBusinessAccountStars", business_connection_id=bcId, star_count=starCount)
+
+    def getBusinessGifts(self, bcId: str, **kwargs):
+        return self._api_call("getBusinessAccountGifts", business_connection_id=bcId, **kwargs)
+
+    def convertBusinessGiftToStars(self, bcId: str, ownedGiftId: str):
+        return self._api_call("convertGiftToStars", business_connection_id=bcId, owned_gift_id=ownedGiftId)
+
+    def upgradeBusinessGift(self, bcId: str, ownedGiftId: str, **kwargs):
+        return self._api_call("upgradeGift", business_connection_id=bcId, owned_gift_id=ownedGiftId, **kwargs)
+
+    def transferBusinessGift(self, bcId: str, ownedGiftId: str, newOwnerChatId: int, starCount: int = None):
+        return self._api_call("transferGift", business_connection_id=bcId, owned_gift_id=ownedGiftId, new_owner_chat_id=newOwnerChatId, star_count=starCount)
+
+    def postStory(self, bcId: str, content: dict, activePeriod: int, **kwargs):
+        return self._api_call("postStory", business_connection_id=bcId, content=content, active_period=activePeriod, **kwargs)
+
+    def editStory(self, bcId: str, storyId: int, content: dict, **kwargs):
+        return self._api_call("editStory", business_connection_id=bcId, story_id=storyId, content=content, **kwargs)
+
+    def deleteStory(self, bcId: str, storyId: int):
+        return self._api_call("deleteStory", business_connection_id=bcId, story_id=storyId)
 
     def timer(self, seconds: float, fn, fireNow: bool = False) -> TimerHandle:
         handle = TimerHandle()
@@ -2886,9 +3004,14 @@ class Gramly:
         threading.Thread(target=_loop, daemon=True).start()
         return handle
 
-    def send(self, target, text, inline=None, keyboard=None, photo=None, forceReply: bool = None, **kwargs):
+    def send(
+        self, target, text, inline=None, keyboard=None, photo=None,
+        forceReply: bool = None, businessConnectionId: str = None, **kwargs,
+    ):
         cid = chatId(target)
         markup = self._resolveMarkup(inline, keyboard, forceReply=forceReply)
+        if businessConnectionId is not None:
+            kwargs["businessConnectionId"] = businessConnectionId
         if isinstance(text, dict):
             cleaned, attachments = _collectRichAttachments(text)
             self._debug("send", chat=cid, rich=True, blocks=len(text.get("blocks", [])) or None)
@@ -2899,16 +3022,28 @@ class Gramly:
             return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
         return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
-    def reply(self, message, text, keyboard=None, inline=None, photo=None, forceReply: bool = None, **kwargs):
-        markup = self._resolveMarkup(inline, keyboard, forceReply=forceReply)
+    def reply(
+        self, message, text, keyboard=None, inline=None, photo=None,
+        forceReply: bool = None, businessConnectionId: str = None, **kwargs,
+    ):
         cid, msgId = self._msgFrom(message)
-        if isinstance(text, dict):
-            cleaned, attachments = _collectRichAttachments(text)
-            return self._api_callRich("sendRichMessage", "rich_message", cleaned, attachments,
-                chat_id=cid, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
-        if photo is not None:
-            return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
-        return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
+        _, _, _, sourceBusinessConnectionId, _ = self._msgTarget(message)
+        if (
+            sourceBusinessConnectionId is not None
+            and businessConnectionId is not None
+            and businessConnectionId != sourceBusinessConnectionId
+        ):
+            raise ValueError(
+                "reply businessConnectionId must match the source message"
+            )
+        if businessConnectionId is None:
+            businessConnectionId = sourceBusinessConnectionId
+        kwargs["reply_to_message_id"] = msgId
+        return self.send(
+            cid, text, keyboard=keyboard, inline=inline, photo=photo,
+            forceReply=forceReply, businessConnectionId=businessConnectionId,
+            **kwargs,
+        )
 
     def ephemeral(self, target, text, to=None, keyboard=None, inline=None, photo=None,
                   replaceCallbackMessage: bool = None, **kwargs):
@@ -3092,26 +3227,14 @@ class Gramly:
                 chat_id=cid, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
         return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
-    def businessPhoto(self, target, photo, bcId: str, caption=None, inline=None, keyboard=None, **kwargs):
-        return self.photo(target, photo, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
-
     def animation(self, target, animation, caption: str = None, **kwargs):
         return self._api_call("sendAnimation", chat_id=chatId(target), animation=animation, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, **kwargs)
-
-    def businessAnimation(self, target, animation, bcId: str, caption: str = None, **kwargs):
-        return self.animation(target, animation, caption=caption, business_connection_id=bcId, **kwargs)
 
     def videoNote(self, target, videoNote, **kwargs):
         return self._api_call("sendVideoNote", chat_id=chatId(target), video_note=videoNote, **kwargs)
 
-    def businessVideoNote(self, target, videoNote, bcId: str, **kwargs):
-        return self.videoNote(target, videoNote, business_connection_id=bcId, **kwargs)
-
     def paidMedia(self, target, starCount: int, media: list, **kwargs):
         return self._api_call("sendPaidMedia", chat_id=chatId(target), star_count=starCount, media=media, **kwargs)
-
-    def businessPaidMedia(self, target, starCount: int, media: list, bcId: str, **kwargs):
-        return self.paidMedia(target, starCount, media, business_connection_id=bcId, **kwargs)
 
     def react(self, msg, *emojis, isBig=False):
         cid, mid, _, _, _ = self._msgTarget(msg)
@@ -3161,60 +3284,33 @@ class Gramly:
             return self._api_callFile(method, fileKey=key, fileObj=m["_bytes"], filename=m["_filename"], contentType=m["_content_type"], chat_id=cid, caption=cap, parse_mode=parseMode, reply_markup=markup, **kwargs)
         return self._api_call(method, chat_id=cid, **{key: m["media"]}, caption=cap, parse_mode=parseMode, reply_markup=markup, **kwargs)
 
-    def businessMedia(self, target, items, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
-        return self.media(target, items, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
-
     def video(self, target, video, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
         return self._api_call("sendVideo", chat_id=chatId(target), video=video, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
-
-    def businessVideo(self, target, video, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
-        return self.video(target, video, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
 
     def document(self, target, doc, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
         return self._api_call("sendDocument", chat_id=chatId(target), document=doc, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
-    def businessDocument(self, target, doc, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
-        return self.document(target, doc, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
-
     def audio(self, target, audio, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
         return self._api_call("sendAudio", chat_id=chatId(target), audio=audio, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
-
-    def businessAudio(self, target, audio, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
-        return self.audio(target, audio, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
 
     def voice(self, target, voice, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
         return self._api_call("sendVoice", chat_id=chatId(target), voice=voice, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
-    def businessVoice(self, target, voice, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
-        return self.voice(target, voice, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
-
     def sticker(self, target, sticker, **kwargs):
         return self._api_call("sendSticker", chat_id=chatId(target), sticker=sticker, **kwargs)
-
-    def businessSticker(self, target, sticker, bcId: str, **kwargs):
-        return self.sticker(target, sticker, business_connection_id=bcId, **kwargs)
 
     def location(self, target, latitude: float, longitude: float, **kwargs):
         return self._api_call("sendLocation", chat_id=chatId(target), latitude=latitude, longitude=longitude, **kwargs)
 
-    def businessLocation(self, target, latitude: float, longitude: float, bcId: str, **kwargs):
-        return self.location(target, latitude, longitude, business_connection_id=bcId, **kwargs)
-
     def venue(self, target, latitude: float, longitude: float, title: str, address: str, **kwargs):
         return self._api_call("sendVenue", chat_id=chatId(target), latitude=latitude, longitude=longitude, title=title, address=address, **kwargs)
 
-    def businessVenue(self, target, latitude: float, longitude: float, title: str, address: str, bcId: str, **kwargs):
-        return self.venue(target, latitude, longitude, title, address, business_connection_id=bcId, **kwargs)
-
     def contact(self, target, phone: str, firstName: str, lastName: str = None, **kwargs):
         return self._api_call("sendContact", chat_id=chatId(target), phone_number=phone, first_name=firstName, last_name=lastName, **kwargs)
-
-    def businessContact(self, target, phone: str, firstName: str, bcId: str, lastName: str = None, **kwargs):
-        return self.contact(target, phone, firstName, lastName=lastName, business_connection_id=bcId, **kwargs)
 
     def poll(self, target, question: str, options: list, isAnonymous: bool = True, pollType: str = "regular", correctOptionIds: list = None, explanation: str = None, allowsMultipleAnswers: bool = False, allowsRevoting: bool = None, shuffleOptions: bool = None, allowAddingOptions: bool = None, hideResultsUntilCloses: bool = None, description: str = None, openPeriod: int = None, closeDate: int = None, membersOnly: bool = None, countryCodes: list = None, **kwargs):
         params = dict(chat_id=chatId(target), question=question, options=[{"text": o} if isinstance(o, str) else o for o in options], is_anonymous=isAnonymous, type=pollType, allows_multiple_answers=allowsMultipleAnswers, explanation=explanation)
@@ -3241,20 +3337,11 @@ class Gramly:
         params.update(kwargs)
         return self._api_call("sendPoll", **params)
 
-    def businessPoll(self, target, question: str, options: list, bcId: str, **kwargs):
-        return self.poll(target, question, options, business_connection_id=bcId, **kwargs)
-
     def stopPoll(self, target, messageId: int, **kwargs):
         return self._api_call("stopPoll", chat_id=chatId(target), message_id=messageId, **kwargs)
 
-    def businessStopPoll(self, target, messageId: int, bcId: str, **kwargs):
-        return self.stopPoll(target, messageId, business_connection_id=bcId, **kwargs)
-
     def dice(self, target, emoji: str = "\U0001f3b2", **kwargs):
         return self._api_call("sendDice", chat_id=chatId(target), emoji=emoji, **kwargs)
-
-    def businessDice(self, target, bcId: str, emoji: str = "\U0001f3b2", **kwargs):
-        return self.dice(target, emoji=emoji, business_connection_id=bcId, **kwargs)
 
     def game(self, target, gameShortName: str, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
@@ -3588,11 +3675,11 @@ class Gramly:
     def setAccessSettings(self, settings: dict):
         return self._api_call("setManagedBotAccessSettings", **settings)
 
-    def getManagedToken(self):
-        return self._api_call("getManagedBotToken")
+    def getManagedToken(self, userId: int):
+        return self._api_call("getManagedBotToken", user_id=userId)
 
-    def replaceManagedToken(self):
-        return self._api_call("replaceManagedBotToken")
+    def replaceManagedToken(self, userId: int):
+        return self._api_call("replaceManagedBotToken", user_id=userId)
 
     def getStickerSet(self, name: str):
         return self._api_call("getStickerSet", name=name)
@@ -3695,7 +3782,7 @@ class Gramly:
         if "callback_query" in update:
             cbRaw = update["callback_query"]
             cbData = CallbackData(cbRaw.get("data") or "")
-            if not await self._runGuards(CallbackQuery(cbRaw, cbData)):
+            if not await self._runGuards(CallbackQuery(cbRaw, cbData, gramly=self)):
                 return
 
         if "inline_query" in update and not await self._runGuards(InlineQuery(update["inline_query"], self)):
@@ -3742,9 +3829,9 @@ class Gramly:
             return
 
         elif "managed_bot" in update:
-            raw = wrap(update["managed_bot"])
+            raw = update["managed_bot"]
             for h in self._managedHandlers:
-                self._submit(h, raw)
+                self._submit(h, ManagedBot(raw, self))
 
         elif "stopped_message_generation" in update:
             raw = wrap(update["stopped_message_generation"])

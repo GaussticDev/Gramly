@@ -1,8 +1,8 @@
 from gramly.gramly import (
     Gramly, Rich,
-    btn, row, kbd, userRequest, chatRequest, business,
+    btn, row, kbd, userRequest, chatRequest, managedBotRequest, business,
     CallbackData, Message, CallbackQuery, InlineQuery, Payment, PreCheckout,
-    JoinRequest, GuestQuery, BusinessMessage, BusinessConnection,
+    JoinRequest, GuestQuery, BusinessMessage, BusinessConnection, ManagedBot,
     TimerHandle, CommandBlock, TelegramError,
     Obj, User, Chat, SuccessfulPayment,
     setupLogging, chatId, userId,
@@ -12,9 +12,9 @@ from gramly.gramly import (
 
 __all__ = [
     "Gramly", "Rich",
-    "btn", "row", "kbd", "userRequest", "chatRequest", "business",
+    "btn", "row", "kbd", "userRequest", "chatRequest", "managedBotRequest", "business",
     "CallbackData", "Message", "CallbackQuery", "InlineQuery", "Payment", "PreCheckout",
-    "JoinRequest", "GuestQuery", "BusinessMessage", "BusinessConnection",
+    "JoinRequest", "GuestQuery", "BusinessMessage", "BusinessConnection", "ManagedBot",
     "TimerHandle", "CommandBlock", "TelegramError",
     "Obj", "User", "Chat", "SuccessfulPayment",
     "setupLogging", "chatId", "userId",
