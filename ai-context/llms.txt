@@ -1,0 +1,44 @@
+# Gramly AI Context
+
+> Compact, version-pinned operating context for AI agents building Telegram bots with Gramly 1.4.x (Telegram Bot API 10.3, Python 3.10+).
+
+This folder is a distilled reference, not the full documentation. Read `AGENTS.md` first, then load only the domain file needed for the task. The complete official documentation is at <https://gramly.gitbook.io/gramly-docs>.
+
+Key facts:
+
+- Package: `gramly`, installed with `pip install gramly`.
+- Current release line: `1.4.x`.
+- Bot API: `10.3`.
+- Runtime: one asyncio event loop; plain handlers run in a thread pool.
+- Entry point: `Gramly("TOKEN")`, then `bot.run()` for long polling.
+- Callback data convention: `action:arg1:arg2`, max 64 bytes.
+- Business handlers use the positional `business()` marker; `business=True` does not exist.
+
+## Start here
+
+- [AGENTS.md](AGENTS.md): Non-negotiable API rules, decision procedure, review checklist.
+- [README.md](README.md): Purpose, context map, and the ten rules that prevent most bugs.
+- [01-overview.md](01-overview.md): Mental model, constructor, async model, run modes, layout.
+
+## Core API
+
+- [02-handlers.md](02-handlers.md): Every handler decorator, CommandBlock, guards, interceptors.
+- [03-messaging.md](03-messaging.md): Send, reply, edit, media, Rich messages, special content, actions.
+- [04-keyboards.md](04-keyboards.md): btn, row, kbd, request buttons, keyboard shapes.
+- [05-chat-admin.md](05-chat-admin.md): Moderation, chat info/settings, invites, topics, join requests.
+- [06-business.md](06-business.md): Business connections, handlers, actions, account management.
+- [07-payments.md](07-payments.md): Invoices, pre-checkout, payments, Stars, gifts.
+- [08-inline-settings.md](08-inline-settings.md): Inline and guest queries, bot settings, profile, stickers.
+- [09-objects.md](09-objects.md): Objects, data classes, errors, helpers, timers.
+- [11-api-index.md](11-api-index.md): Alphabetical index of every public Gramly method.
+
+## Implementation guidance
+
+- [10-patterns.md](10-patterns.md): Canonical recipes, anti-patterns, state, deployment, testing.
+
+## Optional
+
+- [Official Gramly documentation](https://gramly.gitbook.io/gramly-docs): Full prose documentation and examples.
+- [Official llms-full.txt](https://gramly.gitbook.io/gramly-docs/llms-full.txt): Entire documentation in one file.
+- [Telegram Bot API](https://core.telegram.org/bots/api): Underlying platform reference.
+- [gramly-context.md](../gramly-context.md): All files in this folder packed into a single Markdown bundle.
